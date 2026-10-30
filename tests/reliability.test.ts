@@ -253,3 +253,123 @@ test('publication capacity prevents review spending and an unchanged limit canno
     assert.equal(mock.calls.generation, 1);
   } finally { mock.restore(); }
 });
+
+test('known claim after repair survives review failure and restart without an executable pilot or export', async () => {
+  const owner = 'known-claim-resume'; let project = await pending(owner);
+  const original = globalThis.fetch; let generations = 0; let reviews = 0;
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (isCampaignReview(body)) {
+      reviews++;
+      const reviewInput = JSON.parse(body.input);
+      assert.equal(reviewInput.proposedMessages[0], 'This shoe offers mental clarity.');
+      assert.deepEqual(reviewInput.proposedDirections[0].testPlan.variants, []);
+      assert.equal(reviewInput.proposedDirections[0].testPlan.contract, undefined);
+      return geminiResponse(body, reviews === 1 ? 'not JSON' : { issues: [] });
+    }
+    generations++;
+    const value = draft(JSON.parse(body.input));
+    value.directions[0].testPlan.message = 'This shoe offers mental clarity.';
+    return geminiResponse(body, value);
+  };
+  try {
+    project = await new PitchProof(store, env).execute(owner, project.id, command(project, { action: 'advance' }));
+    assert.equal(project.operation?.failureStage, 'review');
+    assert.equal(project.operation?.failureCode, 'MODEL_REVIEW_RESPONSE');
+    assert.equal(generations, 2);
+    const checkpoint = await store.draft(owner, project.id, project.operation!.id);
+    assert.equal((checkpoint?.payload as { version: number }).version, 2);
+    assert.equal((checkpoint?.payload as { repairExhausted: boolean }).repairExhausted, true);
+    project = await new PitchProof(new Store(db), env).execute(owner, project.id, command(project, { action: 'retry' }));
+    project = await new PitchProof(new Store(db), env).execute(owner, project.id, command(project, { action: 'advance' }));
+    assert.equal(project.status, 'ready');
+    assert.equal(generations, 2);
+    const flagged = project.generations[0].directions[0];
+    assert.equal(flagged.unverifiedClaim, true);
+    assert.deepEqual(flagged.testPlan.variants, []);
+    assert.equal(flagged.testPlan.contract, undefined);
+    assert.match(flagged.testPlan.hypothesis, /unavailable/i);
+    const { renderBriefHtml, renderBriefMarkdown } = await import('../lib/export');
+    for (const exportText of [renderBriefHtml(project), renderBriefMarkdown(project)]) {
+      assert.doesNotMatch(exportText, /Private draft proposal 0|mental clarity/i);
+      assert.match(exportText, /unresolved review findings/);
+    }
+  } finally { globalThis.fetch = original; }
+});
+
+test('semantic repair is checkpointed before its review and reused after restart', async () => {
+  const owner = 'semantic-repair-resume'; let project = await pending(owner);
+  const original = globalThis.fetch; let generations = 0; let reviews = 0;
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (isCampaignReview(body)) {
+      reviews++;
+      if (reviews === 2) return geminiResponse(body, 'not JSON');
+      return geminiResponse(body, { issues: [{ directionIndex: 1, code: 'unsupported_claim', reason: 'Private review detail' }] });
+    }
+    generations++;
+    const value = draft(JSON.parse(body.input));
+    value.directions[0].title = `Repaired proposal ${generations}`;
+    return geminiResponse(body, value);
+  };
+  try {
+    project = await new PitchProof(store, env).execute(owner, project.id, command(project, { action: 'advance' }));
+    assert.equal(project.operation?.failureCode, 'MODEL_REVIEW_RESPONSE');
+    assert.equal(generations, 2);
+    project = await new PitchProof(new Store(db), env).execute(owner, project.id, command(project, { action: 'retry' }));
+    project = await new PitchProof(new Store(db), env).execute(owner, project.id, command(project, { action: 'advance' }));
+    assert.equal(project.status, 'ready'); assert.equal(generations, 2);
+    assert.equal(project.generations[0].directions[0].title, 'Repaired proposal 2');
+    assert.equal(project.generations[0].directions[0].unverifiedClaim, true);
+    assert.deepEqual(project.generations[0].directions[0].testPlan.variants, []);
+    assert.equal(project.generations[0].directions[0].testPlan.contract, undefined);
+  } finally { globalThis.fetch = original; }
+});
+
+test('generation repair exhausts the single repair even when the repaired draft passes known-claim checks', async () => {
+  const owner = 'single-generation-repair'; let project = await pending(owner);
+  const original = globalThis.fetch; let generations = 0; let reviews = 0;
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (isCampaignReview(body)) {
+      reviews++;
+      return geminiResponse(body, reviews === 1 ? 'not JSON' : { issues: [{ directionIndex: 2, code: 'unsupported_claim', reason: 'Private review detail' }] });
+    }
+    generations++;
+    const value = draft(JSON.parse(body.input));
+    if (generations === 1) value.directions[0].testPlan.message = 'This shoe offers mental clarity.';
+    return geminiResponse(body, value);
+  };
+  try {
+    project = await new PitchProof(store, env).execute(owner, project.id, command(project, { action: 'advance' }));
+    assert.equal(project.operation?.failureCode, 'MODEL_REVIEW_RESPONSE');
+    const checkpoint = await store.draft(owner, project.id, project.operation!.id);
+    assert.equal((checkpoint?.payload as { repairExhausted: boolean }).repairExhausted, true);
+    project = await new PitchProof(new Store(db), env).execute(owner, project.id, command(project, { action: 'retry' }));
+    project = await new PitchProof(new Store(db), env).execute(owner, project.id, command(project, { action: 'advance' }));
+    assert.equal(project.status, 'ready');
+    assert.equal(generations, 2); assert.equal(reviews, 2);
+    assert.equal(project.generations[0].directions[1].unverifiedClaim, true);
+    assert.equal(project.generations[0].directions[1].testPlan.contract, undefined);
+  } finally { globalThis.fetch = original; }
+});
+
+test('a structurally invalid first draft can be repaired into a flagged known claim while other validation remains strict', async () => {
+  const owner = 'structure-then-known'; let project = await pending(owner);
+  const original = globalThis.fetch; let generations = 0;
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (isCampaignReview(body)) return geminiResponse(body, { issues: [] });
+    generations++;
+    const value = draft(JSON.parse(body.input));
+    if (generations === 1) value.directions[0].evidenceIds = ['E1', 'unknown'];
+    else value.directions[0].testPlan.message = 'This shoe offers mental clarity.';
+    return geminiResponse(body, value);
+  };
+  try {
+    project = await new PitchProof(store, env).execute(owner, project.id, command(project, { action: 'advance' }));
+    assert.equal(project.status, 'ready'); assert.equal(generations, 2);
+    assert.equal(project.generations[0].directions[0].unverifiedClaim, true);
+    assert.equal(project.generations[0].directions[0].testPlan.contract, undefined);
+  } finally { globalThis.fetch = original; }
+});

@@ -4,7 +4,7 @@ import { AppError, fail, hash, now, randomToken, safeFailure, uid } from './erro
 import type { ProjectInput } from './validation';
 import { Store, type DraftFence } from './store';
 import { researchQloo, searchQloo } from './providers/qloo';
-import { requireProviders, revisionPlan, generateDraft, restoreDraft, reviewDraft, directionsFromDraft, synthesisIdentity, CONTRACT_VERSION, modelConfiguration, type ProviderEnv, type SynthesisDraft } from './providers/synthesis';
+import { requireProviders, revisionPlan, generateDraft, restoreDraft, reviewDraft, directionsFromDraft, unavailablePilot, synthesisIdentity, CONTRACT_VERSION, modelConfiguration, type ProviderEnv, type SynthesisDraft } from './providers/synthesis';
 import type { ProviderObserver } from './providers/http';
 type ResearchResult = { stepId: string } & ({ evidence: Awaited<ReturnType<typeof researchQloo>>; failure: null } | { evidence: null; failure: AppError });
 export function makeProject(input: ProjectInput): Project {
@@ -150,8 +150,15 @@ export class PitchProof {
         contextHash = await hash(synthesisIdentity(this.env, operation, records, claimed));
         const checkpoint = await this.store.draft(owner, claimed.id, operation.id);
         let draft: SynthesisDraft | null = null;
+        let repairExhausted = false;
         if (checkpoint?.contextHash === contextHash) {
-          try { draft = restoreDraft(checkpoint.payload, operation, records, claimed); } catch { await this.store.discardDraft(owner, claimed.id, operation.id, contextHash, operation.leaseToken!); }
+          try {
+            const payload = checkpoint.payload;
+            if (payload && typeof payload === 'object' && 'version' in payload && payload.version === 2 && 'draft' in payload && 'repairExhausted' in payload && typeof payload.repairExhausted === 'boolean') {
+              repairExhausted = payload.repairExhausted;
+              draft = restoreDraft(payload.draft, operation, records, claimed, repairExhausted);
+            } else draft = restoreDraft(payload, operation, records, claimed);
+          } catch { repairExhausted = false; await this.store.discardDraft(owner, claimed.id, operation.id, contextHash, operation.leaseToken!); }
         } else if (checkpoint) await this.store.discardDraft(owner, claimed.id, operation.id, checkpoint.contextHash, operation.leaseToken!);
         failureStage = draft ? 'review' : 'generation';
         const units = draft ? 1 : 2;
@@ -159,33 +166,38 @@ export class PitchProof {
         const reserveExtra = async (name: string) => {
           if (!await this.store.budget(owner, 1, { id: `${operation.id}:${operation.leaseToken}:${name}`, projectId: claimed.id, operationId: operation.id, leaseToken: operation.leaseToken! }, this.env.DEMO_UNLIMITED_DAILY_CAP === 'true')) fail(409, 'OPERATION_BUSY', 'This provider attempt has already started. Reload saved progress.');
         };
-        if (!draft) draft = await generateDraft(this.env, operation, records, claimed, observe('generation'), () => reserveExtra('generation-repair'), attempt => reserveExtra(`generation-retry-${attempt}`));
-        {
+        if (!draft) {
+          draft = await generateDraft(this.env, operation, records, claimed, observe('generation'), () => reserveExtra('generation-repair'), attempt => reserveExtra(`generation-retry-${attempt}`), false, () => { repairExhausted = true; });
+        }
+        const saveCheckpoint = async () => {
           const latest = await this.store.read(owner, claimed.id);
-          if (latest.operation?.id !== operation.id || latest.operation.leaseToken !== operation.leaseToken) return latest;
+          if (latest.operation?.id !== operation.id || latest.operation.leaseToken !== operation.leaseToken) fail(409, 'OPERATION_OBSOLETE', 'This operation is no longer active.');
           const latestRecords = latest.evidence.filter(record => record.runId === operation.id);
           if (await hash(synthesisIdentity(this.env, latest.operation, latestRecords, latest)) !== contextHash) fail(409, 'CONTEXT_CHANGED', 'The campaign context changed during generation. Your research is saved. Retry with the latest notes and decisions.');
           const capacity = structuredClone(latest);
-          capacity.generations.push({ id: uid(), createdAt: now(), model: modelConfiguration(this.env).model, directions: directionsFromDraft(draft, operation, records, claimed), evidenceIds: records.map(record => record.id), parentDirectionId: operation.parentDirectionId, feedback: operation.feedback, brief: operation.brief, references: operation.references, measurements: [...(operation.measurements ?? []), ...measurements], contractVersion: CONTRACT_VERSION }); capacity.operation = null;
+          capacity.generations.push({ id: uid(), createdAt: now(), model: modelConfiguration(this.env).model, directions: directionsFromDraft(draft!, operation, records, claimed, repairExhausted), evidenceIds: records.map(record => record.id), parentDirectionId: operation.parentDirectionId, feedback: operation.feedback, brief: operation.brief, references: operation.references, measurements: [...(operation.measurements ?? []), ...measurements], contractVersion: CONTRACT_VERSION }); capacity.operation = null;
           this.store.serialize(capacity);
           latest.operation.modelStage = 'review'; latest.operation.measurementsTruncated ||= (latest.operation.measurements?.length ?? 0) + measurements.length > 80; latest.operation.measurements = [...(latest.operation.measurements ?? []), ...measurements].slice(-80);
-          await this.store.saveDraft(owner, latest.version, latest, contextHash, draft); measurements = [];
-        }
+          await this.store.saveDraft(owner, latest.version, latest, contextHash!, { version: 2, draft, repairExhausted }); measurements = [];
+        };
+        await saveCheckpoint();
         failureStage = 'review';
-        let unverified = await reviewDraft(this.env, operation, records, claimed, draft, observe('review'), () => reserveExtra('review-retry'), true);
-        if (unverified.length) {
+        let unverified = await reviewDraft(this.env, operation, records, claimed, draft, observe('review'), () => reserveExtra('review-retry'), true, repairExhausted);
+        if (unverified.length && !repairExhausted) {
           if (!await this.store.budget(owner, 2, { id: `${operation.id}:${operation.leaseToken}:claim-repair`, projectId: claimed.id, operationId: operation.id, leaseToken: operation.leaseToken! }, this.env.DEMO_UNLIMITED_DAILY_CAP === 'true')) fail(409, 'OPERATION_BUSY', 'This claim repair has already started. Reload saved progress.');
           const repairOperation = { ...operation, validationFeedback: [...new Set([...(operation.validationFeedback ?? []), 'CAMPAIGN_REVIEW' as const, ...(unverified.some(issue => issue.code === 'unsupported_claim') ? ['UNSUPPORTED_PRODUCT_COPY' as const] : [])])] };
           failureStage = 'generation';
-          draft = await generateDraft(this.env, repairOperation, records, claimed, observe('generation'), undefined, () => reserveExtra('claim-repair-generation-retry'));
+          draft = await generateDraft(this.env, repairOperation, records, claimed, observe('generation'), undefined, () => reserveExtra('claim-repair-generation-retry'), true);
+          repairExhausted = true;
+          await saveCheckpoint();
           failureStage = 'review';
-          unverified = await reviewDraft(this.env, operation, records, claimed, draft, observe('review'), () => reserveExtra('claim-repair-review-retry'), true);
+          unverified = await reviewDraft(this.env, operation, records, claimed, draft, observe('review'), () => reserveExtra('claim-repair-review-retry'), true, true);
         }
-        const directions = directionsFromDraft(draft, operation, records, claimed);
+        const directions = directionsFromDraft(draft, operation, records, claimed, repairExhausted);
         for (const issue of unverified) {
           const direction = directions[issue.directionIndex];
           direction.reviewWarnings = [...new Set([...(direction.reviewWarnings ?? []), issue.code])];
-          if (issue.code === 'unsupported_claim') direction.unverifiedClaim = true;
+          if (issue.code === 'unsupported_claim') { direction.unverifiedClaim = true; direction.testPlan = unavailablePilot(); }
         }
         generation = { id: uid(), createdAt: now(), model: `${modelConfiguration(this.env).provider}/${modelConfiguration(this.env).model}`, directions, evidenceIds: records.map(record => record.id), parentDirectionId: operation.parentDirectionId, feedback: operation.feedback, brief: structuredClone(operation.brief), references: structuredClone(operation.references), contractVersion: CONTRACT_VERSION, runStartedAt: operation.startedAt };
         publication = { operationId: operation.id, leaseToken: operation.leaseToken!, contextHash };

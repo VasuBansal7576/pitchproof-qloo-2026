@@ -377,3 +377,14 @@ test('OpenCode gpt-6-luna uses no reasoning for generation, review and planning 
     assert.deepEqual(requests.map(request => request.reasoning_effort), [undefined, undefined]);
   } finally { globalThis.fetch = original; }
 });
+
+test('allowing known claims after repair does not relax citation or pilot grammar checks', () => {
+  const { operation, evidence, project } = fixture();
+  const invalidCitation = output();
+  invalidCitation.directions[0].testPlan.message = 'This shoe offers mental clarity.';
+  invalidCitation.directions[0].evidenceIds = ['E1', 'unknown'];
+  assert.throws(() => restoreDraft(invalidCitation, operation, evidence, project, true), error => error instanceof AppError && error.code === 'INVALID_CITATIONS');
+  const invalidGrammar = output();
+  invalidGrammar.directions[0].testPlan.message = 'Discover mental clarity!';
+  assert.throws(() => restoreDraft(invalidGrammar, operation, evidence, project, true), error => error instanceof AppError && error.code === 'INVALID_PILOT_MESSAGE');
+});

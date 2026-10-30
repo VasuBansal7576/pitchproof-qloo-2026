@@ -122,7 +122,7 @@ function requireEvidence(evidence: Evidence[]): void {
 }
 function visualReferenceNames(evidence: Evidence[]): string[] { return [...new Set(evidence.flatMap(record => [record.entity.name, ...record.context.referenceNames]))]; }
 const normalize = (value: string) => value.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{M}\p{N}]/gu, '');
-export function restoreDraft(value: unknown, operation: Operation, evidence: Evidence[], _project: Project): SynthesisDraft {
+export function restoreDraft(value: unknown, operation: Operation, evidence: Evidence[], _project: Project, allowKnownClaims = false): SynthesisDraft {
   void _project;
   requireEvidence(evidence);
   const facts = suppliedFacts(operation.brief);
@@ -137,6 +137,7 @@ export function restoreDraft(value: unknown, operation: Operation, evidence: Evi
   const aliases = new Set(evidence.map((_, index) => `E${index + 1}`));
   const factIds = new Set(facts.map(fact => fact.id));
   const visualNames = new Set(visualReferenceNames(evidence).map(name => name.trim()));
+  assertNoKnownUnsupportedClaims(campaignCallToAction(operation.brief), facts);
   const titles = new Set<string>();
   const hooks = new Set<string>();
   if (new Set(draft.directions.map(direction => direction.campaign.device)).size !== 3) fail(502, 'DUPLICATE_DIRECTIONS', 'The model repeated a campaign device. Retry synthesis.');
@@ -149,33 +150,48 @@ export function restoreDraft(value: unknown, operation: Operation, evidence: Evi
     if (new Set(direction.productFactIds).size !== direction.productFactIds.length || direction.productFactIds.some(id => !factIds.has(id))) fail(502, 'INVALID_PRODUCT_FACTS', `The model returned unsupported product fact references in direction ${index + 1}. Retry synthesis.`);
     if (titles.has(normalize(direction.title)) || hooks.has(normalize(direction.hook))) fail(502, 'DUPLICATE_DIRECTIONS', 'The model returned duplicate directions. Retry synthesis.');
     titles.add(normalize(direction.title)); hooks.add(normalize(direction.hook));
-    try {
-      assertNoKnownUnsupportedClaims(direction, facts);
-      buildConceptPilot(direction.testPlan.message, operation.brief, direction.productFactIds);
-    } catch (error) {
-      const code = error instanceof AppError && ['PRODUCT_FACTS_REQUIRED', 'PRODUCT_FACTS_INVALID', 'PRODUCT_FACT_IDS_INVALID', 'CAMPAIGN_CTA_INVALID', 'UNSUPPORTED_PRODUCT_COPY', 'INVALID_PILOT_MESSAGE'].includes(error.code) ? error.code : 'CAMPAIGN_PRODUCT_CLAIM';
-      const location = error instanceof KnownClaimViolation ? ` at ${error.field} (known pattern ${error.rule})` : '';
-      fail(502, code, `The automated campaign check found ${code} in direction ${index + 1}${location}. Edit the brief or retry synthesis.`);
+    for (const check of [() => assertNoKnownUnsupportedClaims(direction, facts), () => buildConceptPilot(direction.testPlan.message, operation.brief, direction.productFactIds)]) {
+      try { check(); } catch (error) {
+        if (allowKnownClaims && error instanceof KnownClaimViolation) continue;
+        const code = error instanceof AppError && ['PRODUCT_FACTS_REQUIRED', 'PRODUCT_FACTS_INVALID', 'PRODUCT_FACT_IDS_INVALID', 'CAMPAIGN_CTA_INVALID', 'UNSUPPORTED_PRODUCT_COPY', 'INVALID_PILOT_MESSAGE'].includes(error.code) ? error.code : 'CAMPAIGN_PRODUCT_CLAIM';
+        const location = error instanceof KnownClaimViolation ? ` at ${error.field} (known pattern ${error.rule})` : '';
+        fail(502, code, `The automated campaign check found ${code} in direction ${index + 1}${location}. Edit the brief or retry synthesis.`);
+      }
     }
   }
   return draft;
 }
 
+export function knownClaimDirections(draft: SynthesisDraft, operation: Operation): number[] {
+  const facts = suppliedFacts(operation.brief);
+  return draft.directions.flatMap((direction, index) => {
+    try {
+      assertNoKnownUnsupportedClaims(direction, facts);
+      buildConceptPilot(direction.testPlan.message, operation.brief, direction.productFactIds);
+      return [];
+    } catch (error) { if (error instanceof KnownClaimViolation) return [index]; throw error; }
+  });
+}
+export function unavailablePilot(): Direction['testPlan'] {
+  return { hypothesis: 'Pilot unavailable until the unverified claim is resolved.', variants: [], metric: 'Not available.', successCriterion: 'Not available.' };
+}
 function materialize(draft: SynthesisDraft, operation: Operation, evidence: Evidence[], withIds: boolean) {
   const records = new Map(evidence.map((record, index) => [`E${index + 1}`, record]));
-  return draft.directions.map(({ evidenceIds, ...direction }) => ({
+  const flagged = new Set(knownClaimDirections(draft, operation));
+  return draft.directions.map(({ evidenceIds, ...direction }, index) => ({
     ...direction,
     ...(withIds ? { id: uid() } : {}),
     campaign: {
       ...direction.campaign, productRole: productRole(operation.brief, direction.productFactIds), callToAction: campaignCallToAction(operation.brief),
       evidenceBridge: direction.campaign.evidenceBridge.map(bridge => ({ ...bridge, evidenceId: withIds ? records.get(bridge.evidenceId)!.id : bridge.evidenceId })),
     },
-    testPlan: buildConceptPilot(direction.testPlan.message, operation.brief, direction.productFactIds),
+    ...(flagged.has(index) ? { unverifiedClaim: true as const, reviewWarnings: ['unsupported_claim'] as ReviewWarning[] } : {}),
+    testPlan: flagged.has(index) ? unavailablePilot() : buildConceptPilot(direction.testPlan.message, operation.brief, direction.productFactIds),
     claims: evidenceIds.map(id => ({ text: records.get(id)!.observation, evidenceIds: [withIds ? records.get(id)!.id : id] })),
   }));
 }
-export function directionsFromDraft(draft: SynthesisDraft, operation: Operation, evidence: Evidence[], project: Project): Direction[] {
-  return materialize(restoreDraft(draft, operation, evidence, project), operation, evidence, true) as Direction[];
+export function directionsFromDraft(draft: SynthesisDraft, operation: Operation, evidence: Evidence[], project: Project, allowKnownClaims = false): Direction[] {
+  return materialize(restoreDraft(draft, operation, evidence, project, allowKnownClaims), operation, evidence, true) as Direction[];
 }
 export function validateDirections(value: unknown, evidence: Evidence[], operation: Operation, project: Project): Direction[] {
   return directionsFromDraft(restoreDraft(value, operation, evidence, project), operation, evidence, project);
@@ -215,7 +231,7 @@ async function modelText(env: ProviderEnv, input: string, review: boolean, schem
     return request();
   }
 }
-export async function generateDraft(env: ProviderEnv, operation: Operation, evidence: Evidence[], project: Project, observe?: ProviderObserver, reserveRepair?: () => Promise<void>, reserveRetry?: (attempt: number) => Promise<void>): Promise<SynthesisDraft> {
+export async function generateDraft(env: ProviderEnv, operation: Operation, evidence: Evidence[], project: Project, observe?: ProviderObserver, reserveRepair?: () => Promise<void>, reserveRetry?: (attempt: number) => Promise<void>, knownClaimRepairExhausted = false, onRepairUsed?: () => void): Promise<SynthesisDraft> {
   requireEvidence(evidence);
   const facts = suppliedFacts(operation.brief);
   const schema = directionResponseSchema(evidence.map((_, index) => `E${index + 1}`), facts.map(fact => fact.id), modelConfiguration(env).provider === 'opencode' ? visualReferenceNames(evidence) : undefined);
@@ -229,18 +245,19 @@ export async function generateDraft(env: ProviderEnv, operation: Operation, evid
       if (typeof response !== 'string' || response.length > 90_000) fail(502, 'MODEL_RESPONSE', 'The model did not return a usable structured creative brief.');
       let parsed: unknown;
       try { parsed = JSON.parse(response); } catch { fail(502, 'MODEL_RESPONSE', 'The model returned invalid JSON. Retry synthesis.'); }
-      return restoreDraft(parsed, operation, evidence, project);
+      return restoreDraft(parsed, operation, evidence, project, knownClaimRepairExhausted || repairCode !== undefined);
     } catch (error) {
       if (attempt || !reserveRepair || !(error instanceof AppError) || !repairable.has(error.code)) throw error;
       await reserveRepair();
+      onRepairUsed?.();
       repairCode = error.code;
     }
   }
   throw new Error('Unreachable generation state');
 }
-export async function reviewDraft(env: ProviderEnv, operation: Operation, evidence: Evidence[], project: Project, draft: SynthesisDraft, observe?: ProviderObserver, reserveRetry?: () => Promise<void>, allowWarnings = false): Promise<{ directionIndex: number; code: ReviewWarning }[]> {
-  const validated = restoreDraft(draft, operation, evidence, project);
-  const input = JSON.stringify({ context: JSON.parse(synthesisInput(operation, evidence, project)), proposedDirections: materialize(validated, operation, evidence, false) });
+export async function reviewDraft(env: ProviderEnv, operation: Operation, evidence: Evidence[], project: Project, draft: SynthesisDraft, observe?: ProviderObserver, reserveRetry?: () => Promise<void>, allowWarnings = false, allowKnownClaims = false): Promise<{ directionIndex: number; code: ReviewWarning }[]> {
+  const validated = restoreDraft(draft, operation, evidence, project, allowKnownClaims);
+  const input = JSON.stringify({ context: JSON.parse(synthesisInput(operation, evidence, project)), proposedDirections: materialize(validated, operation, evidence, false), proposedMessages: validated.directions.map(direction => direction.testPlan.message) });
   const response = await modelText(env, input, true, servingSchema(z.toJSONSchema(reviewOutputSchema)), observe, reserveRetry);
   let parsed: unknown;
   if (typeof response !== 'string' || response.length > 20_000) fail(502, 'MODEL_REVIEW_RESPONSE', 'The automated campaign check did not complete. Retry synthesis.');
