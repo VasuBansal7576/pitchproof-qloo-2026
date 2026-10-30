@@ -58,7 +58,7 @@ test('OpenCode Go uses its fixed endpoint and retries a transient failure after 
     calls++;
     assert.equal(String(url), 'https://opencode.ai/inference/go/openai/v1/chat/completions');
     assert.match(new Headers(init?.headers).get('x-opencode-session') ?? '', /^ses_[0-9a-f-]+$/);
-    assert.equal(JSON.parse(String(init?.body)).model, 'glm-5.3-flash');
+    assert.equal(JSON.parse(String(init?.body)).model, 'gpt-6-luna');
     assert.equal(new Headers(init?.headers).get('authorization'), 'Bearer opencode-key');
     return calls === 1 ? new Response('unavailable', { status: 503 }) : modelResponse(output());
   };

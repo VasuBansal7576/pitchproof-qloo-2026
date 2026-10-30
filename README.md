@@ -47,7 +47,7 @@ Local and hosted databases are separate. Do not add credentials or Qloo response
 | `MODEL_API_KEY` | Server credential for Gemini or OpenAI. Also used as a fallback for OpenCode when `OPENCODE_API_KEY` is empty. |
 | `OPENCODE_API_KEY` | Server credential for OpenCode Go. |
 | `MODEL_PROVIDER` | `opencode`, `gemini`, or `openai`. The default is `gemini`. |
-| `MODEL_NAME` | Model identifier. Defaults to `glm-5.3-flash` for OpenCode Go, `gemini-2.5-flash` for Gemini, or `gpt-4.1-mini` for OpenAI. |
+| `MODEL_NAME` | Model identifier. Defaults to `gpt-6-luna` for OpenCode Go, `gemini-2.5-flash` for Gemini, or `gpt-4.1-mini` for OpenAI. |
 
 Gemini 3.x configurations use stateless Interactions requests. Gemini 2.5 configurations retain the legacy generateContent transport. The workspace settings show the deployed model; it is a runtime setting independent of source releases. Set `MODEL_NAME` explicitly for the model enabled on your provider account.
 

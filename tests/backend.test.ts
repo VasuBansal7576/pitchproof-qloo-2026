@@ -393,23 +393,24 @@ test('review rejection and reviewer failures preserve all research and the previ
  }finally{globalThis.fetch=original;}
 });
 
-test('irrelevant quality findings do not block or trigger a repair',async()=>{
- const owner='quality-warning'; const p=pendingSynthesis(); await store.create(owner,p);
- const original=globalThis.fetch; let generations=0; let reviews=0;
- const codes=['feedback_conflict','weak_campaign','evidence_gap','confounded_test'];
- globalThis.fetch=async(_url,init)=>{
-  const body=JSON.parse(String(init?.body));
-  if(isCampaignReview(body)){ reviews++; return geminiResponse(body,{issues:codes.map(code=>({directionIndex:2,code,reason:'Private reviewer text'}))}); }
-  generations++; const input=JSON.parse(body.input);
-  if(generations===2) { assert.ok(input.serverValidationFeedback.includes('CAMPAIGN_REVIEW')); assert.ok(!input.serverValidationFeedback.includes('UNSUPPORTED_PRODUCT_COPY')); }
-  return geminiResponse(body,campaignOutput(input));
- };
+test('out-of-contract review findings fail closed and do not publish a generation',async()=>{
+ const original=globalThis.fetch;
  try {
-  const result=await new PitchProof(store,{QLOO_API_KEY:'synthetic-key',MODEL_API_KEY:'synthetic-key',MODEL_NAME:'gemini-3.5-flash-lite'}).execute(owner,p.id,command(p,{action:'advance'}));
-  assert.equal(result.status,'ready'); assert.equal(generations,1); assert.equal(reviews,1);
-  assert.equal(result.generations.at(-1)?.directions[1].reviewWarnings,undefined);
-  assert.equal(result.generations.at(-1)?.directions[1].unverifiedClaim,undefined);
-  assert.doesNotMatch(JSON.stringify(result),/Private reviewer text/);
+  for (const code of ['feedback_conflict','weak_campaign','evidence_gap','confounded_test']) {
+   const owner=`invalid-review-${code}`; const p=pendingSynthesis(); await store.create(owner,p);
+   let generations=0; let reviews=0;
+   globalThis.fetch=async(_url,init)=>{
+    const body=JSON.parse(String(init?.body));
+    if(isCampaignReview(body)){ reviews++; return geminiResponse(body,{issues:[{directionIndex:2,code,reason:'Private reviewer text'}]}); }
+    generations++; return geminiResponse(body,campaignOutput(JSON.parse(body.input)));
+   };
+   const result=await new PitchProof(store,{QLOO_API_KEY:'synthetic-key',MODEL_API_KEY:'synthetic-key',MODEL_NAME:'gemini-3.5-flash-lite'}).execute(owner,p.id,command(p,{action:'advance'}));
+   assert.equal(result.status,'error'); assert.equal(result.operation?.failureCode,'MODEL_REVIEW_RESPONSE');
+   assert.equal(generations,1); assert.equal(reviews,1);
+   assert.deepEqual(result.generations,p.generations);
+   assert.deepEqual((await store.read(owner,p.id)).generations,p.generations);
+   assert.doesNotMatch(JSON.stringify(result),/Private reviewer text/);
+  }
  } finally {globalThis.fetch=original;}
 });
 

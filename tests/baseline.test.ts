@@ -38,7 +38,7 @@ test('OpenCode Go baseline uses its session header and strict structured output'
     assert.match(headers.get('x-opencode-session') ?? '', /^ses_[0-9a-f-]{36}$/);
     assert.equal(headers.get('authorization'), 'Bearer opencode-key');
     const request = JSON.parse(String(init?.body));
-    assert.equal(request.model, 'glm-5.3-flash');
+    assert.equal(request.model, 'gpt-6-luna');
     assert.equal(request.response_format.type, 'json_schema');
     assert.equal(request.response_format.json_schema.strict, true);
     assert.equal(request.response_format.json_schema.name, 'campaign_baseline');
