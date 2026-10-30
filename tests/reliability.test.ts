@@ -44,7 +44,7 @@ function providers(reviewFailure: '503' | 'malformed' | 'quality' = '503') {
       if (calls.review === 1 || reviewFailure === '503' && calls.review === 2) {
         if (reviewFailure === '503') return new Response('private vendor details', { status: 503 });
         if (reviewFailure === 'malformed') return geminiResponse(body, 'not JSON');
-        return geminiResponse(body, { issues: [{ directionIndex: 1, code: 'weak_campaign', reason: 'Private draft proposal has a secret generated claim' }] });
+        return geminiResponse(body, { issues: [{ directionIndex: 1, code: 'unsupported_claim', reason: 'Private draft proposal has a secret generated claim' }] });
       }
       return geminiResponse(body, { issues: [] });
     }

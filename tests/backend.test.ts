@@ -393,7 +393,7 @@ test('review rejection and reviewer failures preserve all research and the previ
  }finally{globalThis.fetch=original;}
 });
 
-test('quality findings receive one repair and remain labeled when unresolved',async()=>{
+test('irrelevant quality findings do not block or trigger a repair',async()=>{
  const owner='quality-warning'; const p=pendingSynthesis(); await store.create(owner,p);
  const original=globalThis.fetch; let generations=0; let reviews=0;
  const codes=['feedback_conflict','weak_campaign','evidence_gap','confounded_test'];
@@ -406,8 +406,8 @@ test('quality findings receive one repair and remain labeled when unresolved',as
  };
  try {
   const result=await new PitchProof(store,{QLOO_API_KEY:'synthetic-key',MODEL_API_KEY:'synthetic-key',MODEL_NAME:'gemini-3.5-flash-lite'}).execute(owner,p.id,command(p,{action:'advance'}));
-  assert.equal(result.status,'ready'); assert.equal(generations,2); assert.equal(reviews,2);
-  assert.deepEqual(result.generations.at(-1)?.directions[1].reviewWarnings,codes);
+  assert.equal(result.status,'ready'); assert.equal(generations,1); assert.equal(reviews,1);
+  assert.equal(result.generations.at(-1)?.directions[1].reviewWarnings,undefined);
   assert.equal(result.generations.at(-1)?.directions[1].unverifiedClaim,undefined);
   assert.doesNotMatch(JSON.stringify(result),/Private reviewer text/);
  } finally {globalThis.fetch=original;}

@@ -37,6 +37,11 @@ test('OpenAI receives strict structured output for generation and review', async
     assert.equal(request.response_format.type, 'json_schema');
     assert.equal(request.response_format.json_schema.strict, true);
     assert.equal(request.response_format.json_schema.schema.additionalProperties, false);
+    if (request.response_format.json_schema.name === 'campaign_review') {
+      assert.deepEqual(request.response_format.json_schema.schema.properties.issues.items.properties.code.enum, ['unsupported_claim']);
+      assert.match(request.messages[0].content, /solely for unsupported product claims/);
+      assert.match(request.messages[0].content, /cannot verify facts, evidence, rights or campaign results/);
+    }
     names.push(request.response_format.json_schema.name);
     return modelResponse(names.length === 1 ? output() : { issues: [] });
   };
@@ -202,7 +207,7 @@ test('invalid pilot feedback guides synthetic generation while message and seman
   operation.validationFeedback = ['INVALID_PILOT_MESSAGE'];
   assert.notEqual(synthesisIdentity(env, operation, evidence, project), before);
   let message = 'Discover your moment.';
-  let reviewCode: 'confounded_test' | null = 'confounded_test';
+  let reviewCode: 'unsupported_claim' | null = 'unsupported_claim';
   let generationRequests = 0;
   let reviewRequests = 0;
   let generationInstruction = '';
@@ -266,9 +271,9 @@ test('review sees the published product and pilot contract and never exposes its
     assert.equal(input.proposedDirections[0].campaign.callToAction, published[0].campaign?.callToAction);
     assert.equal(input.proposedDirections[0].campaign.productRole, published[0].campaign?.productRole);
     assert.equal('id' in input.proposedDirections[0], false);
-    return modelResponse({ issues: [{ directionIndex: 2, code: 'weak_campaign', reason: 'PRIVATE GENERATED CAMPAIGN COPY MUST NOT BE EXPOSED' }] });
+    return modelResponse({ issues: [{ directionIndex: 2, code: 'unsupported_claim', reason: 'PRIVATE GENERATED CAMPAIGN COPY MUST NOT BE EXPOSED' }] });
   }, async () => {
-    await assert.rejects(() => reviewDraft(env, operation, evidence, project, draft), error => error instanceof AppError && error.code === 'CAMPAIGN_REVIEW' && /weak_campaign in direction 2/.test(error.message) && !/PRIVATE GENERATED/.test(error.message));
+    await assert.rejects(() => reviewDraft(env, operation, evidence, project, draft), error => error instanceof AppError && error.code === 'CAMPAIGN_REVIEW' && /unsupported_claim in direction 2/.test(error.message) && !/PRIVATE GENERATED/.test(error.message));
   });
   assert.deepEqual(draft, before);
 });
