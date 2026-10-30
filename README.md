@@ -15,7 +15,7 @@ flowchart LR
   B --> C[Directions, baseline comparison and export]
 ```
 
-Open the [published app](https://pitchproof-studio.zippy17.chatgpt.site) and follow the [judge instructions](docs/submission/judge-testing.md). The [readiness review](docs/submission/readiness-review.md) distinguishes current live failures from historical successful samples. A test or build pass does not mean the current hosted creative flow has passed.
+Open the [published app](https://pitchproof-studio.zippy17.chatgpt.site). The [public source repository](https://github.com/VasuBansal7576/pitchproof-qloo-2026) includes the MIT license and setup instructions. The [judge instructions](docs/submission/judge-testing.md) and [readiness review](docs/submission/readiness-review.md) distinguish live failures from historical successful samples. A test or build pass does not mean the current hosted creative flow has passed.
 
 The broader goal covers lifestyle agency campaigns. Footwear is the first acceptance case. The [founder briefing](docs/submission/founder-pitch.md), [conditional economics](docs/submission/unit-economics.md), and [agency worksheet](docs/agency-review/review-worksheet.md) state the unverified business assumptions.
 
